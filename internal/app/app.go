@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -74,18 +75,13 @@ func (a App) Run(ctx context.Context, apply bool) (Result, error) {
 		return res, err
 	}
 
-	plan, err := a.plan(ctx, employees, accounts, policies)
-	if err != nil {
-		return res, err
-	}
-
-	res.Plan = plan
+	res.Plan = a.plan(employees, accounts, policies)
 
 	if !apply {
 		return res, nil
 	}
 
-	return res, a.apply(ctx, plan)
+	return res, a.apply(ctx, res.Plan)
 }
 
 func (a App) loadAndValidateData(ctx context.Context) (state.Accounts, state.Employees, state.Policies, error) {
@@ -137,10 +133,99 @@ func validateEmployeeDepartments(employees state.Employees, policies state.Polic
 // plan computes the ordered actions needed to bring the accounts in line with
 // the HR snapshot and the policy. It performs no writes.
 func (a App) plan(
-	ctx context.Context, employees state.Employees, accounts state.Accounts,
+	employees state.Employees, accounts state.Accounts,
 	policies state.Policies,
-) (state.Plan, error) {
-	return state.Plan{}, errNotImplemented
+) state.Plan {
+	plan := state.Plan{}
+	allManagedGroups := policies.ManagedGroups()
+
+	for id, employee := range employees {
+		managedGroups := policies[employee.Department]
+
+		acc, foundAcc := accounts[id]
+		if !foundAcc {
+			if employee.Status != state.StatusActive {
+				continue
+			}
+
+			plan.Actions = append(plan.Actions, state.Action{
+				Op:         state.OpCreate,
+				EmployeeID: id,
+			})
+		}
+
+		if acc.Enabled && employee.Status != state.StatusActive {
+			plan.Actions = append(plan.Actions, state.Action{
+				Op:         state.OpDisable,
+				EmployeeID: id,
+			})
+		} else if !acc.Enabled && employee.Status == state.StatusActive {
+			plan.Actions = append(plan.Actions, state.Action{
+				Op:         state.OpEnable,
+				EmployeeID: id,
+			})
+		}
+
+		// Leavers need to be stripped of all managed groups, so their entitled
+		// set stays empty. They also don't get any new ones.
+		var emplSet state.GroupSet
+		accSet := acc.Groups.Set()
+		if employee.Status == state.StatusActive {
+			emplSet = managedGroups.Set()
+
+			for _, grp := range managedGroups {
+				if !accSet.Contains(grp) {
+					plan.Actions = append(plan.Actions, state.Action{
+						Op:         state.OpAddGroup,
+						EmployeeID: id,
+						Group:      grp,
+					})
+				}
+			}
+		}
+
+		for _, grp := range acc.Groups {
+			if allManagedGroups.Contains(grp) && !emplSet.Contains(grp) {
+				plan.Actions = append(plan.Actions, state.Action{
+					Op:         state.OpRemoveGroup,
+					EmployeeID: id,
+					Group:      grp,
+				})
+			}
+		}
+	}
+
+	for id := range accounts {
+		if _, found := employees[id]; found {
+			continue
+		}
+
+		plan.Orphans = append(plan.Orphans, id)
+	}
+
+	// opRank ensures that actions are applied in order of revocation first,
+	// then grants. Disabling is first to cut off access immediately. Removal of
+	// managed groups is next, followed by creating a disabled account, then
+	// adding managed groups. Enabling is last. This way an account cannot be
+	// live without its groups already applied.
+	opRank := map[state.Op]int{
+		state.OpDisable:     0,
+		state.OpRemoveGroup: 1,
+		state.OpCreate:      2,
+		state.OpAddGroup:    3,
+		state.OpEnable:      4,
+	}
+
+	slices.SortFunc(plan.Actions, func(a, b state.Action) int {
+		return cmp.Or(
+			cmp.Compare(opRank[a.Op], opRank[b.Op]),
+			cmp.Compare(a.EmployeeID, b.EmployeeID),
+			cmp.Compare(a.Group, b.Group),
+		)
+	})
+	slices.Sort(plan.Orphans)
+
+	return plan
 }
 
 // apply executes the plan in order through the store, stopping at the first

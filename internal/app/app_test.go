@@ -38,16 +38,14 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name string
 		// dir is the fixture directory; it defaults to name.
-		dir   string
-		apply bool
-		// wantErr is the error Run must return, checked with errors.Is. Nil
-		// means Run must succeed.
-		wantErr error
-		// wantWrites are the writes Run must attempt, in order.
-		wantWrites []state.Action
-		// wantState names the fixture the application file must match after
-		// the run.
-		wantState string
+		dir         string
+		apply       bool
+		wantErr     error
+		wantWrites  []state.Action
+		wantPlan    []state.Action
+		wantOrphans []state.EmployeeID
+		wantState   string
+
 		// forbidden lists managed groups each account must not hold after the
 		// run.
 		forbidden map[state.EmployeeID][]state.Group
@@ -130,12 +128,13 @@ func TestRun(t *testing.T) {
 			forbidden:  map[state.EmployeeID][]state.Group{"E001": {"retail"}},
 		},
 		{
-			name:       "department mapped to no groups gets an account without groups",
-			dir:        "department_without_groups",
-			apply:      true,
-			wantWrites: []state.Action{create("E001"), enable("E001")},
-			wantState:  "want.json",
-			forbidden:  map[state.EmployeeID][]state.Group{"E001": {"finance", "retail"}},
+			name:        "department mapped to no groups gets an account without groups",
+			dir:         "department_without_groups",
+			apply:       true,
+			wantWrites:  []state.Action{create("E001"), enable("E001")},
+			wantOrphans: []state.EmployeeID{"E002"},
+			wantState:   "want.json",
+			forbidden:   map[state.EmployeeID][]state.Group{"E001": {"finance", "retail"}},
 		},
 		{
 			name:       "group mapped from several departments",
@@ -149,10 +148,11 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "accounts absent from HR are left untouched",
-			dir:       "orphans",
-			apply:     true,
-			wantState: unchanged,
+			name:        "accounts absent from HR are left untouched",
+			dir:         "orphans",
+			apply:       true,
+			wantOrphans: []state.EmployeeID{"E900", "E901"},
+			wantState:   unchanged,
 		},
 
 		// Repeatability.
@@ -180,7 +180,8 @@ func TestRun(t *testing.T) {
 				add("E004", "retail"),
 				enable("E004"),
 			},
-			wantState: "want.json",
+			wantOrphans: []state.EmployeeID{"E900"},
+			wantState:   "want.json",
 			forbidden: map[state.EmployeeID][]state.Group{
 				"E001": {"finance"},
 				"E002": {"retail"},
@@ -189,10 +190,22 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:      "plan without apply writes nothing",
-			dir:       "mixed",
-			apply:     false,
-			wantState: unchanged,
+			// Same inputs as the mixed case: the plan must be identical, but
+			// nothing may be written.
+			name:  "plan without apply writes nothing",
+			dir:   "mixed",
+			apply: false,
+			wantPlan: []state.Action{
+				disable("E003"),
+				remove("E002", "retail"),
+				remove("E003", "retail"),
+				create("E004"),
+				add("E002", "finance"),
+				add("E004", "retail"),
+				enable("E004"),
+			},
+			wantOrphans: []state.EmployeeID{"E900"},
+			wantState:   unchanged,
 		},
 
 		// Invalid input rejects the whole run with no writes. Each fixture is
@@ -305,6 +318,18 @@ func TestRun(t *testing.T) {
 
 			before := readFile(t, appPath)
 			writes, res, err := run(t, dir, appPath, tt.apply, nil)
+
+			// Checked before the error so that a failing apply does not hide
+			// a wrong plan. A rejected run must not produce a plan at all.
+			wantPlan := state.Plan{Actions: tt.wantPlan, Orphans: tt.wantOrphans}
+			if tt.apply {
+				wantPlan.Actions = tt.wantWrites
+			}
+			if tt.wantErr != nil {
+				wantPlan = state.Plan{}
+			}
+			assertPlan(t, res.Plan, wantPlan)
+
 			if tt.wantErr == nil && err != nil {
 				t.Fatalf("Run() error = %v, want nil", err)
 			}
@@ -444,6 +469,18 @@ func setupApp(t *testing.T, dir string) string {
 	}
 
 	return appPath
+}
+
+// assertPlan checks the plan's actions, in order, and its orphans.
+func assertPlan(t *testing.T, got, want state.Plan) {
+	t.Helper()
+
+	if !slices.Equal(got.Actions, want.Actions) {
+		t.Errorf("plan actions =\n\t%v\nwant\n\t%v", got.Actions, want.Actions)
+	}
+	if !slices.Equal(got.Orphans, want.Orphans) {
+		t.Errorf("plan orphans = %v, want %v", got.Orphans, want.Orphans)
+	}
 }
 
 func assertWrites(t *testing.T, got, want []state.Action) {

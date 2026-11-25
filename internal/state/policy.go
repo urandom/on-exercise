@@ -7,15 +7,16 @@ package state
 // any other group is unmanaged and must never be added or removed.
 type Policies map[Department]Groups
 
-// IsManaged reports whether the group is controlled by the policy.
-func (p Policies) IsManaged(g Group) bool {
+// ManagedGroups returns every group that at least one department in the
+// policy grants. Groups outside this set are unmanaged and must never be added
+// or removed.
+func (p Policies) ManagedGroups() GroupSet {
+	managed := GroupSet{}
 	for _, groups := range p {
-		for _, pg := range groups {
-			if pg == g {
-				return true
-			}
+		for _, g := range groups {
+			managed[g] = struct{}{}
 		}
 	}
 
-	return false
+	return managed
 }

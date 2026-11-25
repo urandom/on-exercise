@@ -231,7 +231,29 @@ func (a App) plan(
 // apply executes the plan in order through the store, stopping at the first
 // failed write.
 func (a App) apply(ctx context.Context, plan state.Plan) error {
-	return errNotImplemented
+	for _, act := range plan.Actions {
+		var err error
+		switch act.Op {
+		case state.OpDisable:
+			err = a.store.SetEnabled(ctx, act.EmployeeID, false)
+		case state.OpRemoveGroup:
+			err = a.store.RemoveGroup(ctx, act.EmployeeID, act.Group)
+		case state.OpCreate:
+			err = a.store.CreateAccount(ctx, act.EmployeeID)
+		case state.OpAddGroup:
+			err = a.store.AddGroup(ctx, act.EmployeeID, act.Group)
+		case state.OpEnable:
+			err = a.store.SetEnabled(ctx, act.EmployeeID, true)
+		default:
+			err = errors.New("unknown op")
+		}
+
+		if err != nil {
+			return fmt.Errorf("applying plan for %q and op %q: %w", act.EmployeeID, act.Op, err)
+		}
+	}
+
+	return nil
 }
 
 // newRunID returns a random 128-bit run ID as a hex string.

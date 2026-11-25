@@ -579,7 +579,7 @@ func run(
 // recordingStore wraps the file-backed store, records every attempted write
 // and fails the write matching failOn without performing it.
 type recordingStore struct {
-	store.JSONStore
+	*store.JSONStore
 	failOn *state.Action
 	writes []state.Action
 }

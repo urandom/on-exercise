@@ -2,12 +2,18 @@ package hr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/urandom/on-exercise/internal/jsonx"
 	"github.com/urandom/on-exercise/internal/state"
 )
+
+// ErrInvalidSnapshot wraps every error caused by the content of the HR
+// snapshot, so callers can tell bad input apart from other failures.
+var ErrInvalidSnapshot = errors.New("invalid HR snapshot")
 
 // Loader loads and validates the HR snapshot from a configured source.
 //
@@ -21,57 +27,87 @@ func NewLoader(r io.Reader) Loader {
 	return Loader{r: r}
 }
 
-// record is a single HR record as it appears in the snapshot file. Fields are
-// pointers so that a missing or null key decodes to nil and can be told apart
-// from an empty value.
 type record struct {
 	EmployeeID *state.EmployeeID `json:"employee_id"`
 	Status     *state.Status     `json:"status"`
 	Department *state.Department `json:"department"`
 }
 
-// Load decodes the HR snapshot, a JSON array of records, into employees keyed
-// by ID.
+// Load decodes the HR snapshot, a JSON array of records. It rejects the whole
+// snapshot if any record is invalid, reporting every invalid record by
+// position.
 func (l Loader) Load(ctx context.Context) (state.Employees, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	// TODO: export a sentinel error (e.g. ErrInvalidSnapshot) and wrap every
-	// decoding and validation error with it, so callers can use errors.Is.
 	var records []record
 	if err := jsonx.DecodeStrict(l.r, &records); err != nil {
-		return nil, fmt.Errorf("decoding HR snapshot: %w", err)
+		return nil, fmt.Errorf("%w: decoding: %w", ErrInvalidSnapshot, err)
 	}
 
-	// TODO: reject an empty snapshot; it most likely means a bad export, and
-	// would otherwise offboard everyone.
+	// Prevent accidental offboarding by a bad export
+	if len(records) == 0 {
+		return nil, fmt.Errorf("%w: no records", ErrInvalidSnapshot)
+	}
 
 	employees := make(state.Employees, len(records))
-	for _, r := range records {
-		// TODO: reject a record with any nil field (missing or null key).
-		// Until then, value turns nil into the zero value.
-		// TODO: reject an empty employee_id.
-		// TODO: reject a status other than state.StatusActive or
-		// state.StatusInactive.
-		// TODO: reject a duplicate employee_id before inserting; the map
-		// would otherwise keep the last record silently.
-		id := value(r.EmployeeID)
-		employees[id] = state.Employee{
-			EmployeeID: id,
-			Status:     value(r.Status),
-			Department: value(r.Department),
+	var errs []error
+	for i, r := range records {
+		e, err := r.employee()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("record %d: %w", i+1, err))
+			continue
 		}
+
+		if _, dup := employees[e.EmployeeID]; dup {
+			errs = append(errs, fmt.Errorf("record %d: duplicate employee_id %q", i+1, e.EmployeeID))
+			continue
+		}
+
+		employees[e.EmployeeID] = e
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidSnapshot, err)
 	}
 
 	return employees, nil
 }
 
-// value returns *p, or the zero value if p is nil.
-func value[T any](p *T) T {
-	if p == nil {
-		var zero T
-		return zero
+func (r record) employee() (state.Employee, error) {
+	var missing []string
+	if r.EmployeeID == nil {
+		missing = append(missing, "employee_id")
 	}
-	return *p
+	if r.Status == nil {
+		missing = append(missing, "status")
+	}
+	if r.Department == nil {
+		missing = append(missing, "department")
+	}
+	if len(missing) > 0 {
+		return state.Employee{}, fmt.Errorf("missing %s", strings.Join(missing, ", "))
+	}
+
+	id := *r.EmployeeID
+	if id == "" {
+		return state.Employee{}, errors.New("empty employee_id")
+	}
+
+	switch *r.Status {
+	case state.StatusActive, state.StatusInactive:
+	default:
+		return state.Employee{}, fmt.Errorf("employee %q: unknown status %q", id, *r.Status)
+	}
+
+	if *r.Department == "" {
+		return state.Employee{}, fmt.Errorf("employee %q: empty department", id)
+	}
+
+	return state.Employee{
+		EmployeeID: id,
+		Status:     *r.Status,
+		Department: *r.Department,
+	}, nil
 }

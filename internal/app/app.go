@@ -32,7 +32,7 @@ type employeeLoader interface {
 }
 
 type policyLoader interface {
-	Load(context.Context) (state.Policies, error)
+	Load(context.Context) (state.Policy, error)
 }
 
 type Result struct {
@@ -43,7 +43,7 @@ type Result struct {
 type App struct {
 	store     store
 	employees employeeLoader
-	policies  policyLoader
+	policy    policyLoader
 
 	// auditLog records planned actions, write outcomes and orphans. Every
 	// record carries the run ID and employee ID.
@@ -59,7 +59,7 @@ func New(
 	return App{
 		store:     store,
 		employees: employeeLoader,
-		policies:  policyLoader,
+		policy:    policyLoader,
 		auditLog:  auditLog,
 	}
 }
@@ -70,12 +70,12 @@ func New(
 func (a App) Run(ctx context.Context, apply bool) (Result, error) {
 	res := Result{ID: newRunID()}
 
-	accounts, employees, policies, err := a.loadAndValidateData(ctx)
+	accounts, employees, policy, err := a.loadAndValidateData(ctx)
 	if err != nil {
 		return res, err
 	}
 
-	res.Plan = a.plan(employees, accounts, policies)
+	res.Plan = a.plan(employees, accounts, policy)
 
 	if !apply {
 		return res, nil
@@ -84,7 +84,7 @@ func (a App) Run(ctx context.Context, apply bool) (Result, error) {
 	return res, a.apply(ctx, res.Plan)
 }
 
-func (a App) loadAndValidateData(ctx context.Context) (state.Accounts, state.Employees, state.Policies, error) {
+func (a App) loadAndValidateData(ctx context.Context) (state.Accounts, state.Employees, state.Policy, error) {
 	accounts, err := a.store.Load(ctx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("loading app state: %w", err)
@@ -95,27 +95,27 @@ func (a App) loadAndValidateData(ctx context.Context) (state.Accounts, state.Emp
 		return nil, nil, nil, fmt.Errorf("loading employees: %w", err)
 	}
 
-	policies, err := a.policies.Load(ctx)
+	policy, err := a.policy.Load(ctx)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("loading policies: %w", err)
+		return nil, nil, nil, fmt.Errorf("loading policy: %w", err)
 	}
 
-	err = validateEmployeeDepartments(employees, policies)
+	err = validateEmployeeDepartments(employees, policy)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("validating employee departments: %w", err)
 	}
 
-	return accounts, employees, policies, nil
+	return accounts, employees, policy, nil
 }
 
-func validateEmployeeDepartments(employees state.Employees, policies state.Policies) error {
+func validateEmployeeDepartments(employees state.Employees, policy state.Policy) error {
 	var unmappedDepEmployees []state.EmployeeID
 	for id, employee := range employees {
 		if employee.Status != state.StatusActive {
 			continue
 		}
 
-		_, mappedDep := policies[employee.Department]
+		_, mappedDep := policy[employee.Department]
 		if !mappedDep {
 			unmappedDepEmployees = append(unmappedDepEmployees, id)
 		}
@@ -134,13 +134,13 @@ func validateEmployeeDepartments(employees state.Employees, policies state.Polic
 // the HR snapshot and the policy. It performs no writes.
 func (a App) plan(
 	employees state.Employees, accounts state.Accounts,
-	policies state.Policies,
+	policy state.Policy,
 ) state.Plan {
 	plan := state.Plan{}
-	allManagedGroups := policies.ManagedGroups()
+	allManagedGroups := policy.ManagedGroups()
 
 	for id, employee := range employees {
-		managedGroups := policies[employee.Department]
+		managedGroups := policy[employee.Department]
 
 		acc, foundAcc := accounts[id]
 		if !foundAcc {

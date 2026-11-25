@@ -2,12 +2,19 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 
 	"github.com/urandom/on-exercise/internal/jsonx"
 	"github.com/urandom/on-exercise/internal/state"
 )
+
+// ErrInvalidPolicy wraps every error caused by the content of the policy, so
+// callers can tell bad input apart from other failures.
+var ErrInvalidPolicy = errors.New("invalid policy")
 
 // Loader loads and validates the department policy from a configured source.
 //
@@ -22,29 +29,59 @@ func NewLoader(r io.Reader) Loader {
 }
 
 // Load decodes the policy, a JSON object mapping each department to the list
-// of managed groups it grants.
-func (l Loader) Load(ctx context.Context) (state.Policies, error) {
+// of managed groups it grants. It rejects the whole policy if any entry is
+// invalid, reporting every invalid entry.
+func (l Loader) Load(ctx context.Context) (state.Policy, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	// TODO: export a sentinel error (e.g. ErrInvalidPolicy) and wrap every
-	// decoding and validation error with it, so callers can use errors.Is.
-	// TODO: a JSON object with a repeated department key decodes with the
-	// last value winning. Decide whether to detect that (token-level decode)
-	// or accept it.
-	var policies state.Policies
-	if err := jsonx.DecodeStrict(l.r, &policies); err != nil {
-		return nil, fmt.Errorf("decoding policy: %w", err)
+	// TODO: Repeated keys would be accepted, last one winning. Either a list
+	// format or manual token decoding would detect them.
+	var policy state.Policy
+	if err := jsonx.DecodeStrict(l.r, &policy); err != nil {
+		return nil, fmt.Errorf("%w: decoding: %w", ErrInvalidPolicy, err)
 	}
 
-	// TODO: reject an empty policy (including a JSON null, which decodes to
-	// a nil map without error).
-	// TODO: reject an empty department name.
-	// TODO: reject a null group list (decodes to nil without error); an
-	// explicit [] is valid and grants no groups.
-	// TODO: reject empty group names and duplicate groups within one
-	// department.
+	// Empty policy is likely a mistake
+	if len(policy) == 0 {
+		return nil, fmt.Errorf("%w: no departments", ErrInvalidPolicy)
+	}
 
-	return policies, nil
+	// Departments are checked in sorted order so the error is the same on
+	// every run.
+	var errs []error
+	for _, dept := range slices.Sorted(maps.Keys(policy)) {
+		if err := validateDepartment(dept, policy[dept]); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPolicy, err)
+	}
+
+	return policy, nil
+}
+
+func validateDepartment(dept state.Department, groups state.Groups) error {
+	if dept == "" {
+		return errors.New("empty department name")
+	}
+	if groups == nil {
+		return fmt.Errorf("department %q: groups must be a list, not null", dept)
+	}
+
+	seen := make(state.GroupSet, len(groups))
+	for _, g := range groups {
+		if g == "" {
+			return fmt.Errorf("department %q: empty group name", dept)
+		}
+		if seen.Contains(g) {
+			return fmt.Errorf("department %q: duplicate group %q", dept, g)
+		}
+		seen[g] = struct{}{}
+	}
+
+	return nil
 }

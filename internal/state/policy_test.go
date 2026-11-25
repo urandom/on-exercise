@@ -7,20 +7,20 @@ import (
 	"github.com/urandom/on-exercise/internal/state"
 )
 
-func TestPoliciesManagedGroups(t *testing.T) {
+func TestPolicyManagedGroups(t *testing.T) {
 	tests := []struct {
-		name     string
-		policies state.Policies
-		want     state.GroupSet
+		name   string
+		policy state.Policy
+		want   state.GroupSet
 	}{
 		{
-			name:     "empty policy manages nothing",
-			policies: state.Policies{},
-			want:     state.GroupSet{},
+			name:   "empty policy manages nothing",
+			policy: state.Policy{},
+			want:   state.GroupSet{},
 		},
 		{
 			name: "union of all departments' groups",
-			policies: state.Policies{
+			policy: state.Policy{
 				"Retail":  {"retail"},
 				"Finance": {"finance"},
 			},
@@ -28,7 +28,7 @@ func TestPoliciesManagedGroups(t *testing.T) {
 		},
 		{
 			name: "group granted by several departments appears once",
-			policies: state.Policies{
+			policy: state.Policy{
 				"Retail": {"retail"},
 				"Sales":  {"retail", "finance"},
 			},
@@ -36,7 +36,7 @@ func TestPoliciesManagedGroups(t *testing.T) {
 		},
 		{
 			name: "department with no groups adds nothing",
-			policies: state.Policies{
+			policy: state.Policy{
 				"Retail": {"retail"},
 				"Legal":  {},
 			},
@@ -46,7 +46,7 @@ func TestPoliciesManagedGroups(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.policies.ManagedGroups()
+			got := tt.policy.ManagedGroups()
 			if !maps.Equal(got, tt.want) {
 				t.Errorf("ManagedGroups() = %v, want %v", got, tt.want)
 			}
@@ -55,7 +55,7 @@ func TestPoliciesManagedGroups(t *testing.T) {
 }
 
 func TestGroupSetContains(t *testing.T) {
-	managed := state.Policies{"Retail": {"retail"}}.ManagedGroups()
+	managed := state.Policy{"Retail": {"retail"}}.ManagedGroups()
 
 	if !managed.Contains("retail") {
 		t.Error(`Contains("retail") = false, want true`)

@@ -5,12 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/urandom/on-exercise/internal/jsonx"
 	"github.com/urandom/on-exercise/internal/state"
 )
 
 var errNotImplemented = errors.New("not implemented")
+
+// ErrInvalidState wraps every error caused by the content of the application
+// state file, so callers can tell bad input apart from other failures.
+var ErrInvalidState = errors.New("invalid app state")
 
 // JSONStore is the application state adapter backed by a local JSON file.
 //
@@ -25,9 +30,6 @@ func NewJSONStore(f *os.File) JSONStore {
 	return JSONStore{f: f}
 }
 
-// record is a single account as it appears in the application state file.
-// Fields are pointers so that a missing or null key decodes to nil and can be
-// told apart from a zero value.
 type record struct {
 	EmployeeID *state.EmployeeID `json:"employee_id"`
 	Enabled    *bool             `json:"enabled"`
@@ -35,49 +37,78 @@ type record struct {
 }
 
 // Load decodes the application state, a JSON array of accounts, into accounts
-// keyed by employee ID.
+// keyed by employee ID. It rejects the whole state if any account is invalid,
+// reporting every invalid account by position.
 func (s JSONStore) Load(ctx context.Context) (state.Accounts, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	// TODO: export a sentinel error (e.g. ErrInvalidState) and wrap every
-	// decoding and validation error with it, so callers can use errors.Is.
 	var records []record
 	if err := jsonx.DecodeStrict(s.f, &records); err != nil {
-		return nil, fmt.Errorf("decoding app state %s: %w", s.f.Name(), err)
+		return nil, fmt.Errorf("%w: decoding %s: %w", ErrInvalidState, s.f.Name(), err)
 	}
 
-	// An empty state file is valid: the application may have no accounts
-	// yet.
 	accounts := make(state.Accounts, len(records))
-	for _, r := range records {
-		// TODO: reject a record with any nil field (missing or null key).
-		// Until then, value turns nil into the zero value, so a missing
-		// "enabled" reads as false and a missing "groups" as no groups.
-		// TODO: reject an empty employee_id.
-		// TODO: reject empty group names and duplicate groups within one
-		// account.
-		// TODO: reject a duplicate employee_id before inserting; the map
-		// would otherwise keep the last record silently.
-		id := value(r.EmployeeID)
-		accounts[id] = state.Account{
-			EmployeeID: id,
-			Enabled:    value(r.Enabled),
-			Groups:     value(r.Groups),
+	var errs []error
+	for i, r := range records {
+		acc, err := r.account()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("record %d: %w", i+1, err))
+			continue
 		}
+
+		if _, dup := accounts[acc.EmployeeID]; dup {
+			errs = append(errs, fmt.Errorf("record %d: duplicate employee_id %q", i+1, acc.EmployeeID))
+			continue
+		}
+
+		accounts[acc.EmployeeID] = acc
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrInvalidState, s.f.Name(), err)
 	}
 
 	return accounts, nil
 }
 
-// value returns *p, or the zero value if p is nil.
-func value[T any](p *T) T {
-	if p == nil {
-		var zero T
-		return zero
+func (r record) account() (state.Account, error) {
+	var missing []string
+	if r.EmployeeID == nil {
+		missing = append(missing, "employee_id")
 	}
-	return *p
+	if r.Enabled == nil {
+		missing = append(missing, "enabled")
+	}
+	if r.Groups == nil {
+		missing = append(missing, "groups")
+	}
+	if len(missing) > 0 {
+		return state.Account{}, fmt.Errorf("missing %s", strings.Join(missing, ", "))
+	}
+
+	id := *r.EmployeeID
+	if id == "" {
+		return state.Account{}, errors.New("empty employee_id")
+	}
+
+	seen := make(state.GroupSet, len(*r.Groups))
+	for _, g := range *r.Groups {
+		if g == "" {
+			return state.Account{}, fmt.Errorf("account %q: empty group name", id)
+		}
+		if seen.Contains(g) {
+			return state.Account{}, fmt.Errorf("account %q: duplicate group %q", id, g)
+		}
+		seen[g] = struct{}{}
+	}
+
+	return state.Account{
+		EmployeeID: id,
+		Enabled:    *r.Enabled,
+		Groups:     *r.Groups,
+	}, nil
 }
 
 func (s JSONStore) CreateAccount(ctx context.Context, id state.EmployeeID) error {

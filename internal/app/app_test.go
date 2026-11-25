@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path"
@@ -317,7 +319,7 @@ func TestRun(t *testing.T) {
 			appPath := setupApp(t, dir)
 
 			before := readFile(t, appPath)
-			writes, res, err := run(t, dir, appPath, tt.apply, nil)
+			writes, res, records, err := run(t, dir, appPath, tt.apply, nil)
 
 			// Checked before the error so that a failing apply does not hide
 			// a wrong plan. A rejected run must not produce a plan at all.
@@ -329,6 +331,19 @@ func TestRun(t *testing.T) {
 				wantPlan = state.Plan{}
 			}
 			assertPlan(t, res.Plan, wantPlan)
+
+			// Planned actions and orphans are recorded for every run that
+			// gets past validation; outcomes only for applied runs.
+			records.assertRunID(t, res.ID)
+			records.assertPlanned(t, wantPlan)
+			var wantOutcomes []outcome
+			if tt.apply {
+				wantOutcomes = outcomes(wantPlan.Actions, "succeeded")
+			}
+			records.assertOutcomes(t, wantOutcomes)
+			if tt.wantErr != nil && !records.has("run_rejected") {
+				t.Error("run log has no run_rejected record")
+			}
 
 			if tt.wantErr == nil && err != nil {
 				t.Fatalf("Run() error = %v, want nil", err)
@@ -430,7 +445,7 @@ func TestRunRecovery(t *testing.T) {
 
 			// First run: the injected write fails and the run reports it.
 			before := readFile(t, appPath)
-			writes, failedRes, err := run(t, tt.dir, appPath, true, &tt.failOn)
+			writes, failedRes, records, err := run(t, tt.dir, appPath, true, &tt.failOn)
 			if !errors.Is(err, errInjected) {
 				t.Fatalf("failing run: Run() error = %v, want it to wrap %v", err, errInjected)
 			}
@@ -440,9 +455,30 @@ func TestRunRecovery(t *testing.T) {
 			assertWrites(t, writes, tt.wantFailedWrites)
 			assertState(t, appPath, before, tt.dir, tt.wantFailedState)
 
+			// The failed write is recorded as failed, never as succeeded,
+			// and every action after it as not attempted.
+			records.assertRunID(t, failedRes.ID)
+			failed := len(tt.wantFailedWrites) - 1
+			wantOutcomes := slices.Concat(
+				outcomes(tt.wantFailedWrites[:failed], "succeeded"),
+				outcomes(tt.wantFailedWrites[failed:], "failed"),
+				outcomes(failedRes.Plan.Actions[failed+1:], "not_attempted"),
+			)
+			records.assertOutcomes(t, wantOutcomes)
+
+			// The error belongs to the failed outcome only; the run's final
+			// record just says it failed, so each failure is counted once.
+			finished := records.find(t, "run_finished")
+			if finished["result"] != "failed" {
+				t.Errorf("run_finished result = %v, want failed", finished["result"])
+			}
+			if _, ok := finished["error"]; ok {
+				t.Errorf("run_finished repeats the error: %v", finished)
+			}
+
 			// Second run: starts from the saved state and finishes the job.
 			before = readFile(t, appPath)
-			writes, res, err := run(t, tt.dir, appPath, true, nil)
+			writes, res, records, err := run(t, tt.dir, appPath, true, nil)
 			if err != nil {
 				t.Fatalf("recovery run: Run() error = %v", err)
 			}
@@ -451,6 +487,8 @@ func TestRunRecovery(t *testing.T) {
 			}
 			assertWrites(t, writes, tt.wantRecoveryWrites)
 			assertState(t, appPath, before, tt.dir, "want.json")
+			records.assertRunID(t, res.ID)
+			records.assertOutcomes(t, outcomes(tt.wantRecoveryWrites, "succeeded"))
 
 			assertNoOpRerun(t, tt.dir, appPath)
 			assertForbidden(t, appPath, tt.forbidden)
@@ -515,7 +553,7 @@ func assertNoOpRerun(t *testing.T, dir, appPath string) {
 	t.Helper()
 
 	before := readFile(t, appPath)
-	writes, _, err := run(t, dir, appPath, true, nil)
+	writes, _, _, err := run(t, dir, appPath, true, nil)
 	if err != nil {
 		t.Fatalf("rerun: Run() error = %v", err)
 	}
@@ -554,7 +592,7 @@ func assertForbidden(t *testing.T, appPath string, forbidden map[state.EmployeeI
 // run's result.
 func run(
 	t *testing.T, dir, appPath string, apply bool, failOn *state.Action,
-) ([]state.Action, app.Result, error) {
+) ([]state.Action, app.Result, runLog, error) {
 	t.Helper()
 
 	f, err := os.Open(appPath)
@@ -563,17 +601,19 @@ func run(
 	}
 	defer f.Close()
 
+	var logBuf bytes.Buffer
 	s := &recordingStore{JSONStore: store.NewJSONStore(f), failOn: failOn}
 	a := app.New(
 		s,
 		hr.NewLoader(bytes.NewReader(fixture(t, dir, "hr.json"))),
 		policy.NewLoader(bytes.NewReader(fixture(t, dir, "policy.json"))),
-		slog.New(slog.NewJSONHandler(t.Output(), nil)),
+		// Also written to the test output, so failures show the records.
+		slog.New(slog.NewJSONHandler(io.MultiWriter(&logBuf, t.Output()), nil)),
 	)
 
 	res, err := a.Run(t.Context(), apply)
 
-	return s.writes, res, err
+	return s.writes, res, parseRunLog(t, &logBuf), err
 }
 
 // recordingStore wraps the file-backed store, records every attempted write
@@ -714,4 +754,143 @@ func normalize(accounts state.Accounts) state.Accounts {
 	}
 
 	return out
+}
+
+// runLog holds the decoded JSON records a run wrote to its run log.
+type runLog []map[string]any
+
+// outcome is an action together with its recorded result.
+type outcome struct {
+	action state.Action
+	result string
+}
+
+func outcomes(actions []state.Action, result string) []outcome {
+	out := make([]outcome, 0, len(actions))
+	for _, a := range actions {
+		out = append(out, outcome{a, result})
+	}
+	return out
+}
+
+func parseRunLog(t *testing.T, buf *bytes.Buffer) runLog {
+	t.Helper()
+
+	var log runLog
+	dec := json.NewDecoder(buf)
+	for dec.More() {
+		var rec map[string]any
+		if err := dec.Decode(&rec); err != nil {
+			t.Fatalf("decoding run log record: %v", err)
+		}
+		log = append(log, rec)
+	}
+
+	return log
+}
+
+// find returns the single record with the given message.
+func (l runLog) find(t *testing.T, msg string) map[string]any {
+	t.Helper()
+
+	var found []map[string]any
+	for _, rec := range l {
+		if rec["msg"] == msg {
+			found = append(found, rec)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("run log has %d %s records, want 1", len(found), msg)
+	}
+
+	return found[0]
+}
+
+func (l runLog) has(msg string) bool {
+	return slices.ContainsFunc(l, func(rec map[string]any) bool { return rec["msg"] == msg })
+}
+
+// assertRunID checks that every record carries the run's ID.
+func (l runLog) assertRunID(t *testing.T, id string) {
+	t.Helper()
+
+	if len(l) == 0 {
+		t.Error("run log is empty")
+	}
+	for _, rec := range l {
+		if rec["run_id"] != id {
+			t.Errorf("run log record %v has run_id %v, want %s", rec, rec["run_id"], id)
+		}
+	}
+}
+
+// assertPlanned checks the planned and orphan records against the plan.
+func (l runLog) assertPlanned(t *testing.T, want state.Plan) {
+	t.Helper()
+
+	var actions []state.Action
+	var orphans []state.EmployeeID
+	for _, rec := range l {
+		switch rec["msg"] {
+		case "planned":
+			actions = append(actions, recordAction(t, rec))
+		case "orphan":
+			orphans = append(orphans, state.EmployeeID(recordString(t, rec, "employee_id")))
+		}
+	}
+
+	if !slices.Equal(actions, want.Actions) {
+		t.Errorf("planned records =\n\t%v\nwant\n\t%v", actions, want.Actions)
+	}
+	if !slices.Equal(orphans, want.Orphans) {
+		t.Errorf("orphan records = %v, want %v", orphans, want.Orphans)
+	}
+}
+
+// assertOutcomes checks the outcome records, in order.
+func (l runLog) assertOutcomes(t *testing.T, want []outcome) {
+	t.Helper()
+
+	var got []outcome
+	for _, rec := range l {
+		if rec["msg"] != "outcome" {
+			continue
+		}
+		o := outcome{recordAction(t, rec), recordString(t, rec, "result")}
+		if o.result == "failed" && recordString(t, rec, "error") == "" {
+			t.Errorf("failed outcome %v has no error", rec)
+		}
+		got = append(got, o)
+	}
+
+	if !slices.Equal(got, want) {
+		t.Errorf("outcome records =\n\t%v\nwant\n\t%v", got, want)
+	}
+}
+
+func recordAction(t *testing.T, rec map[string]any) state.Action {
+	t.Helper()
+
+	fields, ok := rec["action"].(map[string]any)
+	if !ok {
+		t.Fatalf("run log record %v has no action", rec)
+	}
+	group, _ := fields["group"].(string)
+
+	return state.Action{
+		Op:         state.Op(recordString(t, fields, "op")),
+		EmployeeID: state.EmployeeID(recordString(t, fields, "employee_id")),
+		Group:      state.Group(group),
+	}
+}
+
+func recordString(t *testing.T, rec map[string]any, key string) string {
+	t.Helper()
+
+	v, ok := rec[key].(string)
+	if !ok {
+		t.Fatalf("run log record %v has no string %q", rec, key)
+	}
+
+	return v
 }

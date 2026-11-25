@@ -3,6 +3,7 @@ package state
 import (
 	"fmt"
 	"io"
+	"log/slog"
 )
 
 // Op is a single kind of change to an application account.
@@ -27,6 +28,20 @@ type Action struct {
 	EmployeeID EmployeeID
 	// Group is set only for OpAddGroup and OpRemoveGroup.
 	Group Group
+}
+
+// LogValue logs an action as a group of its fields, so planned actions and
+// their outcomes are always recorded with the same field names.
+func (a Action) LogValue() slog.Value {
+	attrs := []slog.Attr{
+		slog.String("employee_id", string(a.EmployeeID)),
+		slog.String("op", string(a.Op)),
+	}
+	if a.Group != "" {
+		attrs = append(attrs, slog.String("group", string(a.Group)))
+	}
+
+	return slog.GroupValue(attrs...)
 }
 
 // Plan is the result of reconciling the inputs.

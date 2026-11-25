@@ -45,43 +45,75 @@ type App struct {
 	employees employeeLoader
 	policy    policyLoader
 
-	// auditLog records planned actions, write outcomes and orphans. Every
+	// runLog records planned actions, write outcomes and orphans. Every
 	// record carries the run ID and employee ID.
-	auditLog *slog.Logger
+	runLog *slog.Logger
 }
 
 // New creates an App that records planned actions, write outcomes and
-// orphans to auditLog.
+// orphans to runLog.
 func New(
 	store store, employeeLoader employeeLoader, policyLoader policyLoader,
-	auditLog *slog.Logger,
+	runLog *slog.Logger,
 ) App {
 	return App{
 		store:     store,
 		employees: employeeLoader,
 		policy:    policyLoader,
-		auditLog:  auditLog,
+		runLog:    runLog,
 	}
 }
 
 // Run loads and validates all inputs, computes the plan and, if apply is set,
 // applies it. It returns the run's ID, which is generated at the start of the
 // run so that it is available even when the run fails.
+//
+// Every run is recorded in the run log under its run ID: the planned
+// actions and orphans before any write, then, when applying, the outcome of
+// each action (succeeded, failed or not_attempted), and finally how the run
+// ended.
 func (a App) Run(ctx context.Context, apply bool) (Result, error) {
 	res := Result{ID: newRunID()}
+	runLog := a.runLog.With(slog.String("run_id", res.ID))
+
+	mode := "plan"
+	if apply {
+		mode = "apply"
+	}
+	runLog.Info("run_started", slog.String("mode", mode))
 
 	accounts, employees, policy, err := a.loadAndValidateData(ctx)
 	if err != nil {
+		runLog.Error("run_rejected", slog.String("error", err.Error()))
 		return res, err
 	}
 
 	res.Plan = a.plan(employees, accounts, policy)
+	logPlan(runLog, res.Plan)
 
 	if !apply {
+		runLog.Info("run_finished", slog.String("result", "planned"))
 		return res, nil
 	}
 
-	return res, a.apply(ctx, res.Plan)
+	if err := a.apply(ctx, runLog, res.Plan); err != nil {
+		// The error itself is on the failed outcome record, tied to its
+		// action; repeating it here would count each failure twice.
+		runLog.Error("run_finished", slog.String("result", "failed"))
+		return res, err
+	}
+	runLog.Info("run_finished", slog.String("result", "applied"))
+
+	return res, nil
+}
+
+func logPlan(log *slog.Logger, plan state.Plan) {
+	for _, act := range plan.Actions {
+		log.Info("planned", slog.Any("action", act))
+	}
+	for _, id := range plan.Orphans {
+		log.Warn("orphan", slog.String("employee_id", string(id)))
+	}
 }
 
 func (a App) loadAndValidateData(ctx context.Context) (state.Accounts, state.Employees, state.Policy, error) {
@@ -230,30 +262,53 @@ func (a App) plan(
 
 // apply executes the plan in order through the store, stopping at the first
 // failed write.
-func (a App) apply(ctx context.Context, plan state.Plan) error {
-	for _, act := range plan.Actions {
-		var err error
-		switch act.Op {
-		case state.OpDisable:
-			err = a.store.SetEnabled(ctx, act.EmployeeID, false)
-		case state.OpRemoveGroup:
-			err = a.store.RemoveGroup(ctx, act.EmployeeID, act.Group)
-		case state.OpCreate:
-			err = a.store.CreateAccount(ctx, act.EmployeeID)
-		case state.OpAddGroup:
-			err = a.store.AddGroup(ctx, act.EmployeeID, act.Group)
-		case state.OpEnable:
-			err = a.store.SetEnabled(ctx, act.EmployeeID, true)
-		default:
-			err = errors.New("unknown op")
-		}
+func (a App) apply(ctx context.Context, log *slog.Logger, plan state.Plan) error {
+	for i, act := range plan.Actions {
+		if err := a.write(ctx, act); err != nil {
+			// The outcome is logged from the write's own error, so a failed
+			// write can never be recorded as a success. Everything after it
+			// is recorded as not attempted rather than left unaccounted for.
+			log.Error("outcome",
+				slog.Any("action", act),
+				slog.String("result", resultFailed),
+				slog.String("error", err.Error()),
+			)
+			for _, rest := range plan.Actions[i+1:] {
+				log.Warn("outcome", slog.Any("action", rest), slog.String("result", resultNotAttempted))
+			}
 
-		if err != nil {
 			return fmt.Errorf("applying plan for %q and op %q: %w", act.EmployeeID, act.Op, err)
 		}
+
+		log.Info("outcome", slog.Any("action", act), slog.String("result", resultSucceeded))
 	}
 
 	return nil
+}
+
+// Outcome results recorded for each planned action during apply.
+const (
+	resultSucceeded    = "succeeded"
+	resultFailed       = "failed"
+	resultNotAttempted = "not_attempted"
+)
+
+// write performs a single action through the store.
+func (a App) write(ctx context.Context, act state.Action) error {
+	switch act.Op {
+	case state.OpDisable:
+		return a.store.SetEnabled(ctx, act.EmployeeID, false)
+	case state.OpRemoveGroup:
+		return a.store.RemoveGroup(ctx, act.EmployeeID, act.Group)
+	case state.OpCreate:
+		return a.store.CreateAccount(ctx, act.EmployeeID)
+	case state.OpAddGroup:
+		return a.store.AddGroup(ctx, act.EmployeeID, act.Group)
+	case state.OpEnable:
+		return a.store.SetEnabled(ctx, act.EmployeeID, true)
+	default:
+		return errors.New("unknown op")
+	}
 }
 
 // newRunID returns a random 128-bit run ID as a hex string.

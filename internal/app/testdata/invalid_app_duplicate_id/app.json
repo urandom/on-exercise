@@ -1,0 +1,4 @@
+[
+  {"employee_id": "E001", "enabled": true, "groups": ["retail"]},
+  {"employee_id": "E001", "enabled": false, "groups": []}
+]

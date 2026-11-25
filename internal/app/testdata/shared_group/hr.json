@@ -1,0 +1,4 @@
+[
+  {"employee_id": "E001", "status": "active", "department": "Audit"},
+  {"employee_id": "E002", "status": "active", "department": "Audit"}
+]

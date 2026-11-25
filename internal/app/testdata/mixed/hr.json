@@ -1,0 +1,7 @@
+[
+  {"employee_id": "E004", "status": "active", "department": "Retail"},
+  {"employee_id": "E002", "status": "active", "department": "Finance"},
+  {"employee_id": "E005", "status": "inactive", "department": "Finance"},
+  {"employee_id": "E003", "status": "inactive", "department": "Retail"},
+  {"employee_id": "E001", "status": "active", "department": "Retail"}
+]

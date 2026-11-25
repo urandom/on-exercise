@@ -1,0 +1,5 @@
+[
+  {"employee_id": "E001", "enabled": true, "groups": ["retail"]},
+  {"employee_id": "E900", "enabled": true, "groups": ["admin", "finance"]},
+  {"employee_id": "E901", "enabled": false, "groups": []}
+]

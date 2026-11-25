@@ -1,0 +1,7 @@
+[
+  {"employee_id": "E001", "enabled": true, "groups": ["retail", "wiki"]},
+  {"employee_id": "E002", "enabled": true, "groups": ["finance", "vpn"]},
+  {"employee_id": "E003", "enabled": false, "groups": ["wiki"]},
+  {"employee_id": "E004", "enabled": true, "groups": ["retail"]},
+  {"employee_id": "E900", "enabled": true, "groups": ["finance"]}
+]

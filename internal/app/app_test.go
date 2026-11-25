@@ -5,6 +5,7 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -37,9 +38,11 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name string
 		// dir is the fixture directory; it defaults to name.
-		dir     string
-		apply   bool
-		wantErr bool
+		dir   string
+		apply bool
+		// wantErr is the error Run must return, checked with errors.Is. Nil
+		// means Run must succeed.
+		wantErr error
 		// wantWrites are the writes Run must attempt, in order.
 		wantWrites []state.Action
 		// wantState names the fixture the application file must match after
@@ -197,97 +200,97 @@ func TestRun(t *testing.T) {
 		{
 			name:      "invalid_hr_malformed_json",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: hr loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_hr_missing_field",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: hr loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_hr_empty_id",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: hr loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_hr_unknown_status",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: hr loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_hr_unknown_field",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: hr loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_hr_duplicate_id",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: hr loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_hr_empty_snapshot",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: hr loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_app_malformed_groups",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: app loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_app_missing_enabled",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: app loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_app_duplicate_id",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: app loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_policy_malformed",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: policy loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_policy_empty",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: policy loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_policy_empty_group_name",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: policy loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_policy_duplicate_group",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   errors.New("TODO: policy loader sentinel"),
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_active_unmapped_department",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   app.ErrUnmappedDep,
 			wantState: unchanged,
 		},
 		{
 			name:      "invalid_department_case_mismatch",
 			apply:     true,
-			wantErr:   true,
+			wantErr:   app.ErrUnmappedDep,
 			wantState: unchanged,
 		},
 	}
@@ -301,20 +304,20 @@ func TestRun(t *testing.T) {
 			appPath := setupApp(t, dir)
 
 			before := readFile(t, appPath)
-			writes, runID, err := run(t, dir, appPath, tt.apply, nil)
-			if tt.wantErr && err == nil {
-				t.Fatal("Run() succeeded, want error")
-			}
-			if !tt.wantErr && err != nil {
+			writes, res, err := run(t, dir, appPath, tt.apply, nil)
+			if tt.wantErr == nil && err != nil {
 				t.Fatalf("Run() error = %v, want nil", err)
 			}
-			if runID == "" {
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Run() error = %v, want %v", err, tt.wantErr)
+			}
+			if res.ID == "" {
 				t.Error("Run() returned an empty run ID")
 			}
 			assertWrites(t, writes, tt.wantWrites)
 			assertState(t, appPath, before, dir, tt.wantState)
 
-			if tt.apply && !tt.wantErr {
+			if tt.apply && tt.wantErr == nil {
 				assertNoOpRerun(t, dir, appPath)
 			}
 			assertForbidden(t, appPath, tt.forbidden)
@@ -402,11 +405,11 @@ func TestRunRecovery(t *testing.T) {
 
 			// First run: the injected write fails and the run reports it.
 			before := readFile(t, appPath)
-			writes, failedRunID, err := run(t, tt.dir, appPath, true, &tt.failOn)
+			writes, failedRes, err := run(t, tt.dir, appPath, true, &tt.failOn)
 			if !errors.Is(err, errInjected) {
 				t.Fatalf("failing run: Run() error = %v, want it to wrap %v", err, errInjected)
 			}
-			if failedRunID == "" {
+			if failedRes.ID == "" {
 				t.Error("failing run: Run() returned an empty run ID")
 			}
 			assertWrites(t, writes, tt.wantFailedWrites)
@@ -414,12 +417,12 @@ func TestRunRecovery(t *testing.T) {
 
 			// Second run: starts from the saved state and finishes the job.
 			before = readFile(t, appPath)
-			writes, runID, err := run(t, tt.dir, appPath, true, nil)
+			writes, res, err := run(t, tt.dir, appPath, true, nil)
 			if err != nil {
 				t.Fatalf("recovery run: Run() error = %v", err)
 			}
-			if runID == "" || runID == failedRunID {
-				t.Errorf("recovery run: Run() run ID = %q, want a new non-empty ID (failed run was %q)", runID, failedRunID)
+			if res.ID == "" || res.ID == failedRes.ID {
+				t.Errorf("recovery run: Run() run ID = %q, want a new non-empty ID (failed run was %q)", res.ID, failedRes.ID)
 			}
 			assertWrites(t, writes, tt.wantRecoveryWrites)
 			assertState(t, appPath, before, tt.dir, "want.json")
@@ -510,10 +513,11 @@ func assertForbidden(t *testing.T, appPath string, forbidden map[state.EmployeeI
 }
 
 // run executes a single App.Run against the fixtures in dir and the
-// application file at appPath, returning the writes it attempted.
+// application file at appPath, returning the writes it attempted and the
+// run's result.
 func run(
 	t *testing.T, dir, appPath string, apply bool, failOn *state.Action,
-) ([]state.Action, string, error) {
+) ([]state.Action, app.Result, error) {
 	t.Helper()
 
 	f, err := os.Open(appPath)
@@ -527,11 +531,12 @@ func run(
 		s,
 		hr.NewLoader(bytes.NewReader(fixture(t, dir, "hr.json"))),
 		policy.NewLoader(bytes.NewReader(fixture(t, dir, "policy.json"))),
+		slog.New(slog.NewJSONHandler(t.Output(), nil)),
 	)
 
-	runID, err := a.Run(t.Context(), apply)
+	res, err := a.Run(t.Context(), apply)
 
-	return s.writes, runID, err
+	return s.writes, res, err
 }
 
 // recordingStore wraps the file-backed store, records every attempted write

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -64,14 +65,55 @@ func run() error {
 		store.NewJSONStore(appFile),
 		hr.NewLoader(hrFile),
 		policy.NewLoader(policyFile),
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)),
 	)
 
-	runID, err := reconciler.Run(ctx, *fApply)
-	if err != nil {
-		return fmt.Errorf("executing run %s: %w", runID, err)
+	res, runErr := reconciler.Run(ctx, *fApply)
+
+	// The plan is only set once the inputs have been validated. A failed
+	// apply always has at least one action (the write that failed), so an
+	// empty plan alongside an error means the run stopped before planning
+	// and there is nothing meaningful to print.
+	if runErr == nil || len(res.Plan.Actions) > 0 {
+		if err := printResult(os.Stdout, res, *fApply, runErr == nil); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("printing plan: %w", err))
+		}
+	}
+
+	if runErr != nil {
+		return fmt.Errorf("run %s: %w", res.ID, runErr)
 	}
 
 	return nil
+}
+
+// printResult writes the run's plan to w, prefixed with the run ID and mode
+// and, for an apply with actions, followed by whether it completed.
+func printResult(w io.Writer, res app.Result, apply, succeeded bool) error {
+	mode := "plan only, nothing written; rerun with -apply to apply it"
+	if apply {
+		mode = "apply"
+	}
+	if _, err := fmt.Fprintf(w, "Run %s (%s)\n", res.ID, mode); err != nil {
+		return err
+	}
+
+	if _, err := res.Plan.WriteTo(w); err != nil {
+		return err
+	}
+
+	if !apply || len(res.Plan.Actions) == 0 {
+		return nil
+	}
+
+	status := "All actions applied."
+	if !succeeded {
+		status = "Apply failed; actions after the failed one were not attempted. " +
+			"Fix the cause and rerun to complete the remaining actions."
+	}
+	_, err := fmt.Fprintln(w, status)
+
+	return err
 }
 
 // validateArgs rejects stray positional arguments and reports every required

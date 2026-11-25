@@ -15,11 +15,14 @@ import (
 	"github.com/urandom/on-exercise/internal/app"
 	"github.com/urandom/on-exercise/internal/hr"
 	"github.com/urandom/on-exercise/internal/policy"
+	"github.com/urandom/on-exercise/internal/state"
 	"github.com/urandom/on-exercise/internal/store"
 )
 
 var (
-	fApply = flag.Bool("apply", false, "set to true to apply the plan")
+	fApply  = flag.Bool("apply", false, "set to true to apply the plan")
+	fFailOn = flag.String("fail-on", "", "fail the first write for `employee_id` without performing it "+
+		"(for demonstrating failure recovery)")
 
 	// Input files, opened and validated during flag parsing.
 	hrFile, appFile, policyFile *os.File
@@ -62,7 +65,7 @@ func run() error {
 	defer stop()
 
 	reconciler := app.New(
-		store.NewJSONStore(appFile),
+		failingStore{JSONStore: store.NewJSONStore(appFile), target: state.EmployeeID(*fFailOn)},
 		hr.NewLoader(hrFile),
 		policy.NewLoader(policyFile),
 		slog.New(slog.NewJSONHandler(os.Stderr, nil)),
@@ -185,11 +188,13 @@ Prints a read-only plan by default. Changes are only written to the
 application state file when -apply is given.
 
 Usage:
-  %[1]s -hr FILE -app FILE -policy FILE [-apply]
+  %[1]s -hr FILE -app FILE -policy FILE [-apply] [-fail-on EMPLOYEE_ID]
 
 Examples:
   %[1]s -hr hr.json -app app.json -policy policy.json          # show plan
   %[1]s -hr hr.json -app app.json -policy policy.json -apply   # apply plan
+  %[1]s -hr hr.json -app app.json -policy policy.json -apply -fail-on=E004
+                                     # apply, failing the first write for E004
 
 Flags:
 `, name)

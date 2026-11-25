@@ -65,7 +65,7 @@ func (p Plan) WriteTo(w io.Writer) (int64, error) {
 	if len(p.Actions) == 0 {
 		cw.printf("No changes.\n")
 	} else {
-		cw.printf("Actions (%d, in order):\n", len(p.Actions))
+		cw.printf("Actions (%d):\n", len(p.Actions))
 		for _, a := range p.Actions {
 			if a.Group != "" {
 				cw.printf("  %-12s %s %s\n", a.Op, a.EmployeeID, a.Group)

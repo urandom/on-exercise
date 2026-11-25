@@ -33,7 +33,7 @@ func TestPlanWriteTo(t *testing.T) {
 				},
 				Orphans: []state.EmployeeID{"X001"},
 			},
-			want: `Actions (5, in order):
+			want: `Actions (5):
   disable      E002
   remove_group E002 finance
   create       E003
